@@ -2,8 +2,19 @@ import subprocess
 import re
 import sys
 
+print(r"""
+       █▓▒░ subnets2liveIPs ░▒▓█
+    ▄████▄   ▄████▄   ▄████▄   ▄████▄   ▄████▄ 
+   ███▀▀███  ███▀▀███ ███▀▀███ ███▀▀███ ███▀▀███
+   ███   ███ ███   ███ ███   ███ ███   ███ ███   ███
+   ███   ███ ███   ███ ███   ███ ███   ███ ███   ███
+   ███   ███ ███   ███ ███   ███ ███   ███ ███   ███
+   ▀█████▀   ▀█████▀   ▀█████▀   ▀█████▀   ▀█████▀ 
+             by Mr. Robot.txt
+    """)
+
 if len(sys.argv) != 3:
-    print(f'[-] Usage: python {sys.argv[0]} <input_file> <output_file>')
+    print(f'[-] Usage: python {sys.argv[0]} <file with list of subnets> <liveIPs>')
     sys.exit()
 
 # Input file with subnet blocks (one per line)
