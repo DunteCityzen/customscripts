@@ -60,6 +60,16 @@ def extract_employees(data: dict):
 
 
 if __name__ == "__main__":
+    print(r"""
+       █▓▒░ company_linkedin_employees_v1.0 ░▒▓█
+    ▄████▄   ▄████▄   ▄████▄   ▄████▄   ▄████▄ 
+   ███▀▀███  ███▀▀███ ███▀▀███ ███▀▀███ ███▀▀███
+   ███   ███ ███   ███ ███   ███ ███   ███ ███   ███
+   ███   ███ ███   ███ ███   ███ ███   ███ ███   ███
+   ███   ███ ███   ███ ███   ███ ███   ███ ███   ███
+   ▀█████▀   ▀█████▀   ▀█████▀   ▀█████▀   ▀█████▀ 
+             by Mr. Robot.txt
+    """)
     # Step 1: Get total result count from first request
     first = fetch_page(0, 1)
     total_count = first.get("data", {}).get("data", {}).get("searchDashClustersByAll", {}).get("metadata", {}).get("totalResultCount")
