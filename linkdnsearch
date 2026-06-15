@@ -1,0 +1,276 @@
+import requests
+import math
+import time
+import argparse
+import re
+import sys
+from urllib.parse import quote
+
+BANNER = r"""
+       █▓▒░ linkdnsearch ░▒▓█ 
+    ▄████▄   ▄████▄   ▄████▄   ▄████▄   ▄████▄ 
+   ███▀▀███  ███▀▀███ ███▀▀███ ███▀▀███ ███▀▀███
+   ███   ███ ███   ███ ███   ███ ███   ███ ███   ███
+   ███   ███ ███   ███ ███   ███ ███   ███ ███   ███
+   ███   ███ ███   ███ ███   ███ ███   ███ ███   ███
+   ▀█████▀   ▀█████▀   ▀█████▀   ▀█████▀   ▀█████▀ 
+             by Mr. Robot.txt
+"""
+
+BASE_URL = "https://www.linkedin.com/voyager/api/graphql"
+QUERY_ID = "voyagerSearchDashClusters.c0f8645a22a6347486d76d5b9d985fd7"
+COMPANY_LOOKUP_URL = "https://www.linkedin.com/voyager/api/organization/companies"
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="linkdnsearch — LinkedIn employee extractor by Mr. Robot.txt",
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  python linkdnsearch --company enovise-group --cookie 'JSESSIONID=\"ajax:123\"; li_at=AQEDAU...'\n"
+            "  python linkdnsearch --company microsoft --cookie 'JSESSIONID=\"ajax:123\"; li_at=AQEDAU...' --proxy http://127.0.0.1:8080\n"
+            "  python linkdnsearch --company google --cookie 'JSESSIONID=\"ajax:123\"; li_at=AQEDAU...' --socks-proxy socks5://127.0.0.1:1080\n\n"
+            "Tip: The company name is the slug you see in the LinkedIn URL when you visit\n"
+            "     a company's People page, e.g. https://www.linkedin.com/company/enovise%20group/people/\n"
+            "     → pass: enovise-group  (or 'enovise group', spaces are handled automatically)\n\n"
+            "Cookie: Paste either the full browser Cookie header or just the JSESSIONID and li_at parts.\n"
+            "        The script will extract and keep only those two tokens automatically."
+        )
+    )
+    parser.add_argument(
+        "--company", required=True,
+        help="Company URL slug as seen in linkedin.com/company/<slug>/people/"
+    )
+    parser.add_argument(
+        "--cookie", required=True,
+        help="Your LinkedIn cookie string (full header or just JSESSIONID + li_at)"
+    )
+    parser.add_argument(
+        "--proxy",
+        default=None,
+        help="HTTP/HTTPS proxy, e.g. http://127.0.0.1:8080"
+    )
+    parser.add_argument(
+        "--socks-proxy",
+        default=None,
+        dest="socks_proxy",
+        help="SOCKS proxy, e.g. socks5://127.0.0.1:1080"
+    )
+    parser.add_argument(
+        "--user-agent",
+        default="Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
+        dest="user_agent",
+        help="Custom User-Agent string (optional)"
+    )
+    return parser.parse_args()
+
+
+def extract_cookie_tokens(raw_cookie: str) -> str:
+    """
+    Given a raw cookie string (full header or partial), extract only the
+    JSESSIONID and li_at tokens and return a clean cookie string.
+    """
+    jsessionid = re.search(r'JSESSIONID=("[^"]*"|[^\s;]+)', raw_cookie)
+    li_at = re.search(r'li_at=([^\s;]+)', raw_cookie)
+
+    if not jsessionid:
+        print("[!] Could not find JSESSIONID in the provided cookie. Please check and try again.")
+        sys.exit(1)
+    if not li_at:
+        print("[!] Could not find li_at in the provided cookie. Please check and try again.")
+        sys.exit(1)
+
+    return f'JSESSIONID={jsessionid.group(1)}; li_at={li_at.group(1)}'
+
+
+def extract_csrf_token(cookie_str: str) -> str:
+    """Extract the CSRF token value from the JSESSIONID cookie."""
+    m = re.search(r'JSESSIONID="?ajax:(\d+)"?', cookie_str)
+    if not m:
+        print("[!] Could not parse CSRF token from JSESSIONID.")
+        sys.exit(1)
+    return f"ajax:{m.group(1)}"
+
+
+def build_proxies(args) -> dict | None:
+    if args.socks_proxy:
+        return {"http": args.socks_proxy, "https": args.socks_proxy}
+    if args.proxy:
+        return {"http": args.proxy, "https": args.proxy}
+    return None
+
+
+def build_headers(cookie: str, csrf_token: str, user_agent: str) -> dict:
+    return {
+        "Host": "www.linkedin.com",
+        "Cookie": cookie,
+        "User-Agent": user_agent,
+        "Accept": "application/vnd.linkedin.normalized+json+2.1",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "X-Li-Lang": "en_US",
+        "X-Li-Track": (
+            '{"clientVersion":"1.13.38799","mpVersion":"1.13.38799",'
+            '"osName":"web","timezoneOffset":3,"timezone":"Africa/Nairobi",'
+            '"deviceFormFactor":"DESKTOP","mpName":"voyager-web",'
+            '"displayDensity":1,"displayWidth":1785,"displayHeight":969}'
+        ),
+        "X-Li-Page-Instance": "urn:li:page:d_flagship3_company;EH0IICu3R9SoSmB+q2F2jA==",
+        "Csrf-Token": csrf_token,
+        "X-Restli-Protocol-Version": "2.0.0",
+        "X-Li-Pem-Metadata": "Voyager - Organization - Member=organization-people-card",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+    }
+
+
+def resolve_company_id(company_slug: str, headers: dict, proxies: dict | None) -> str:
+    """
+    Look up the numeric LinkedIn company ID for a given URL slug.
+    Uses the Voyager organization search endpoint.
+    """
+    # Normalize: replace spaces with hyphens and URL-encode for the query param
+    normalized = company_slug.strip().replace(" ", "-")
+    encoded = quote(normalized, safe="-")
+
+    url = f"{COMPANY_LOOKUP_URL}?q=universalName&universalName={encoded}&decorationId=com.linkedin.voyager.deco.organization.web.WebFullCompanyMain-12"
+
+    print(f"[-] Resolving company ID for '{normalized}'...")
+    resp = requests.get(url, headers=headers, proxies=proxies, verify=False if proxies else True)
+
+    if resp.status_code == 404:
+        print(f"[!] Company '{normalized}' not found. Double-check the slug from the LinkedIn URL.")
+        sys.exit(1)
+    resp.raise_for_status()
+
+    data = resp.json()
+
+    # Try the normalized+json envelope first, then fall back
+    elements = (
+        data.get("data", {}).get("elements")
+        or data.get("elements")
+        or []
+    )
+
+    # Also check inside "included"
+    if not elements:
+        included = data.get("included", [])
+        elements = [i for i in included if i.get("$type", "").endswith("Company")]
+
+    for el in elements:
+        entity_urn = el.get("entityUrn", "") or el.get("$id", "")
+        m = re.search(r":(\d+)$", entity_urn)
+        if m:
+            company_id = m.group(1)
+            print(f"[+] Resolved company ID: {company_id}")
+            return company_id
+
+    # Last resort: scan the raw text
+    raw = resp.text
+    m = re.search(r'"entityUrn":"urn:li:fs_normalized_company:(\d+)"', raw)
+    if m:
+        company_id = m.group(1)
+        print(f"[+] Resolved company ID: {company_id}")
+        return company_id
+
+    print("[!] Could not parse company ID from the API response.")
+    print("    Response snippet:", raw[:500])
+    sys.exit(1)
+
+
+def fetch_page(start: int, company_id: str, headers: dict, proxies: dict | None, count: int = 50) -> dict:
+    """Fetch one page of employee results."""
+    variables = (
+        f"(start:{start},origin:FACETED_SEARCH,"
+        f"query:(flagshipSearchIntent:ORGANIZATIONS_PEOPLE_ALUMNI,"
+        f"queryParameters:List((key:currentCompany,value:List({company_id})),"
+        f"(key:resultType,value:List(ORGANIZATION_ALUMNI))),includeFiltersInResponse:true),"
+        f"count:{count})"
+    )
+    url = f"{BASE_URL}?variables={variables}&queryId={QUERY_ID}"
+    resp = requests.get(url, headers=headers, proxies=proxies, verify=False if proxies else True)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def extract_employees(data: dict) -> list:
+    """Parse employees out of an API response."""
+    employees = []
+    included = data.get("included", [])
+    for item in included:
+        if "title" in item and "primarySubtitle" in item:
+            name = item.get("title", {}).get("text", "").strip()
+            job = item.get("primarySubtitle", {}).get("text", "").strip()
+            if name:
+                employees.append({"name": name, "title": job})
+    return employees
+
+
+def main():
+    print(BANNER)
+
+    args = parse_args()
+
+    # Build clean cookie and CSRF token
+    cookie = extract_cookie_tokens(args.cookie)
+    csrf_token = extract_csrf_token(cookie)
+    print(f"[+] Cookie parsed OK. CSRF token: {csrf_token}")
+
+    # Build proxy dict
+    proxies = build_proxies(args)
+    if proxies:
+        print(f"[+] Using proxy: {list(proxies.values())[0]}")
+
+    # Build headers
+    headers = build_headers(cookie, csrf_token, args.user_agent)
+
+    # Set referer dynamically
+    slug_encoded = quote(args.company.strip().replace(" ", "-"), safe="-")
+    headers["Referer"] = f"https://www.linkedin.com/company/{slug_encoded}/people/"
+
+    # Resolve the numeric company ID
+    company_id = resolve_company_id(args.company, headers, proxies)
+
+    # Step 1: Get total result count from first request
+    print("[-] Fetching result count...")
+    first = fetch_page(0, company_id, headers, proxies, count=1)
+    total_count = (
+        first.get("data", {})
+            .get("data", {})
+            .get("searchDashClustersByAll", {})
+            .get("metadata", {})
+            .get("totalResultCount")
+    )
+
+    if not total_count:
+        print("[!] Could not find totalResultCount in response. Check your cookie/headers and try again.")
+        sys.exit(1)
+
+    print(f"[+] Total employees found: {total_count}")
+
+    # Step 2: Page through results in chunks of 50
+    employees = []
+    pages = math.ceil(total_count / 50)
+
+    for i in range(pages):
+        start = i * 50
+        end = min(start + 50, total_count)
+        print(f"[-] Fetching employees {start + 1}–{end}...")
+        data = fetch_page(start, company_id, headers, proxies)
+        batch = extract_employees(data)
+        employees.extend(batch)
+        if i < pages - 1:
+            time.sleep(2)  # polite delay between pages
+
+    # Step 3: Output results
+    print()
+    for emp in employees:
+        print(f"  {emp['name']} — {emp['title']}")
+
+    print(f"\n[*] Done. Extracted {len(employees)} employees.")
+
+
+if __name__ == "__main__":
+    main()
